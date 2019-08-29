@@ -313,9 +313,18 @@ class Spider(object):
                         except:
                             pass
 
-                company_tel = contact_json['data']['contact']['tel']
-                company_email = contact_json['data']['contact']['email']
-                company_addr = contact_json['data']['contact']['addr']
+                try:
+                    company_tel = contact_json['data']['contact']['tel']
+                except:
+                    company_tel = None
+                try:
+                    company_email = contact_json['data']['contact']['email']
+                except:
+                    company_email = None
+                try:
+                    company_addr = contact_json['data']['contact']['addr']
+                except:
+                    company_addr = None
 
                 # 团队成员信息
                 person_url = 'https://www.itjuzi.com/api/companies/{}?type=person'.format(str(id))
