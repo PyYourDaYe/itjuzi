@@ -319,7 +319,7 @@ class Spider(object):
 
                 # 团队成员信息
                 person_url = 'https://www.itjuzi.com/api/companies/{}?type=person'.format(str(id))
-                person_json = requests.get(person_url, headers=headers).json()
+                
                 try:
                     person_json = requests.get(person_url,headers=headers, proxies=proxies,
                                                  timeout=4).json()
