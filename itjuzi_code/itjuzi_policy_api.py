@@ -5,6 +5,7 @@ import pymongo
 import time
 import hashlib
 import redis
+from apscheduler.schedulers.blocking import BlockingScheduler
 
 user_agent_list = [
     "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Mobile Safari/537.36",
@@ -76,7 +77,7 @@ class UpdateToken(object):
             with open(self.file_path, 'w') as f:
                 f.write(token)
 
-            time.sleep(1)
+            time.sleep(5)
 
         except Exception as e:
             print(e)
@@ -119,26 +120,64 @@ class Spider(object):
         self.db = pymongo.MongoClient(
             'mongodb://admin:Ai4ever123!@dds-wz92ccd4e2618da433270.mongodb.rds.aliyuncs.com:3717/').itjuzi_20190724
         # self.db = pymongo.MongoClient('localhost', 27017).itjuzi_20190724
+        self.col = self.db['extracted_data']
 
     def save(self, data):
         '''
         储存url和dataId,通过dataId来去重
         :return:
         '''
-        col = self.db['extracted_data']
-        # col = self.db['policy_api']
-        res = col.find_one({'dataId': data['dataId']})
-        # res=None
-        if res is None:
-            res1 = col.insert(data)
-            print('****** 数据存储 ******')
-            print(res1)
+        res = self.col.insert(data)
+        print('****** 数据存储 ******')
+        print(res)
+
+    def parse(self,detail_page):
+        global headers, proxies
+
+        for d in detail_page:
+            if d is None:
+                continue
+            policy_id = d['id']
+            detail_url = 'https://www.itjuzi.com/api/policy/detail?id=' + str(policy_id)
+            dataId = hashlib.sha256(detail_url.encode()).hexdigest()
+            res = self.col.find_one({'dataId': dataId})
+            # print(res)
+            if res:
+                # 去重
+                continue
+
+            try:
+                detail_json = requests.get(detail_url, headers=headers, proxies=proxies, timeout=4).json()
+            except:
+                for x in range(10):
+                    try:
+                        proxies = random.choice(get_proxies())
+                        print(proxies)
+                        detail_json = requests.get(detail_url, headers=headers, proxies=proxies,
+                                                   timeout=4).json()
+                        break
+                    except:
+                        pass
+
+            policy_meta = detail_json['data']
+
+            data = {
+                "category": 'policy_api',
+                'refer': detail_url,
+                'dataId': dataId,
+                'invTime': int(time.time() * 1000)
+            }
+            data.update(policy_meta)
+
+            yield data
+
 
     def data(self):
         global proxies,headers
         col1 = self.db['page']
+        col1.update_one({'name': 'policy_api'}, {'$set': {'page': 1}})
         page = int(col1.find_one({'name': 'policy_api'})['page'])
-        for p in range(page, 1554):
+        for p in range(page, 5):
             print('当前页数为:{}'.format(str(p)))
             list_url = 'https://www.itjuzi.com/api/policy?page={}&per_page=20&location=&begin_time=0&end_time=0&keyword='.format(
                 str(p))
@@ -157,7 +196,7 @@ class Spider(object):
             print('++++++++++  json_content  ++++++++++++')
             if json_content['status'] == '用户未登陆' or '该账户已在其他设备登陆':
                 UpdateToken().get_token()
-                # time.sleep(5)
+
                 with open(file_path, 'r') as f:
                     Authorization = f.read()
                 headers = {
@@ -200,47 +239,21 @@ class Spider(object):
                                 pass
             except Exception as e:
                 print(e)
-            # print(json_content)
+            print(json_content)
 
             detail_page = json_content['data']['data']
-            time.sleep(0.2)
-            for d in detail_page:
-                if d is None:
-                    continue
-                policy_id = d['id']
-                detail_url = 'https://www.itjuzi.com/api/policy/detail?id=' + str(policy_id)
-                # detail_json = requests.get(detail_url, headers=headers).json()
-                try:
-                    detail_json = requests.get(detail_url, headers=headers, proxies=proxies, timeout=4).json()
-                except:
-                    for x in range(10):
-                        try:
-                            proxies = random.choice(get_proxies())
-                            print(proxies)
-                            detail_json = requests.get(detail_url, headers=headers, proxies=proxies,
-                                                        timeout=4).json()
-                            break
-                        except:
-                            pass
-                # print(detail_json)
-                policy_meta = detail_json['data']
-                dataId = hashlib.sha256(detail_url.encode()).hexdigest()
 
-                data = {
-                    "category": 'policy_api',
-                    'refer': detail_url,
-                    'dataId': dataId,
-                    'invTime': int(time.time() * 1000)
-                }
-                data.update(policy_meta)
-
-                #print(data)
+            for data in self.parse(detail_page):
+                print('****** data *****')
+                print(data)
                 self.save(data=data)
-                time.sleep(1)
 
             col1.update_one({'name': 'policy_api'}, {'$set': {'page': p + 1}})
 
 
 if __name__ == '__main__':
-    spider = Spider()
-    spider.data()
+    # spider = Spider()
+    # spider.data()
+    sched = BlockingScheduler()
+    sched.add_job(Spider().data, 'interval', hours=24)
+    sched.start()
