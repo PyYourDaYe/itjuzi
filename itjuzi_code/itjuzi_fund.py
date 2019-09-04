@@ -4,8 +4,17 @@ import random
 import pymongo
 import time
 import hashlib
+import redis
+from apscheduler.schedulers.blocking import BlockingScheduler
+
 '''
-爬取it桔子基金列表页数据
+1.随机User-Agent
+2.ip代理
+3.协程提效
+4.定时任务(APScheduler)
+5.去重(url的hash值去重)
+6.记录状态,增量爬取
+7.自动获取账户权限Token
 '''
 user_agent_list = [
     "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Mobile Safari/537.36",
@@ -23,7 +32,20 @@ user_agent_list = [
 ]
 UserAgent = random.choice(user_agent_list)
 
+def get_proxies():
+    redis_pool = redis.ConnectionPool(host='127.0.0.1', port=6379, db=0)
+    conn = redis.Redis(connection_pool=redis_pool)
+    result = conn.keys()
+    proxy_list =[]
+    for x in result:
+        ip = x.decode()
+        proxy = {'https': ip}
 
+        proxy_list.append(proxy)
+
+    return proxy_list
+proxies=random.choice(get_proxies())
+print(proxies)
 # ++++++++++  json_content  ++++++++++++
 # {'status': '用户未登陆', 'code': 10002}
 
@@ -108,26 +130,85 @@ class Spider(object):
         self.db = pymongo.MongoClient(
             'mongodb://admin:Ai4ever123!@dds-wz92ccd4e2618da433270.mongodb.rds.aliyuncs.com:3717/').itjuzi_20190724
         self.start_url = 'https://www.itjuzi.com/api/fund'
+        self.col = self.db['extracted_data']
 
     def save(self, data):
         '''
         储存url和dataId,通过dataId来去重
         :return:
         '''
-        col = self.db['extracted_data']
-        # col = self.db['fund']
-        res = col.find_one({'dataId': data['dataId']})
-        # res=None
-        if res is None:
-            res1 = col.insert(data)
-            print('****** 数据存储 ******')
-            print(res1)
+        res = self.col.insert(data)
+        print('****** 数据存储 ******')
+        print(res)
+
+    def parse(self,detail_page):
+        global headers,proxies
+        for d in detail_page:
+            if d is None:
+                continue
+            id = d['fund_id']
+            detail_url = 'https://www.itjuzi.com/api/fund/' + str(id)
+            dataId = hashlib.sha256(detail_url.encode()).hexdigest()
+            res = self.col.find_one({'dataId': dataId})
+            # print(res)
+            if res:
+                # 去重
+                continue
+
+            try:
+                detail_json = requests.get(detail_url, headers=headers, proxies=proxies,
+                                           timeout=4).json()
+            except:
+                for x in range(10):
+                    try:
+                        proxies = random.choice(get_proxies())
+                        print(proxies)
+                        detail_json = requests.post(detail_url, headers=headers,
+                                                    proxies=proxies,
+                                                    timeout=4).json()
+                        break
+                    except:
+                        pass
+
+            fund_name = detail_json['data']['fund_name']
+            fund_manage_name = detail_json['data']['fund_manage_name']
+            fund_type = detail_json['data']['fund_type']
+            fund_number = detail_json['data']['fund_number']
+            fund_born_time = detail_json['data']['fund_born_time']
+            fund_records_time = detail_json['data']['fund_records_time']
+            # 机构网址 (中国证券投资基金业协会中登记信息)
+            fund_status = detail_json['data']['fund_status']
+            fund_currency = detail_json['data']['fund_currency']
+            try:
+                invst_id = detail_json['data']['invst_id']
+            except:
+                invst_id = None
+
+            data = {
+                'category': '基金',
+                'fund_id': id,
+                'fund_name': fund_name,
+                'fund_manage_name': fund_manage_name,
+                'fund_type': fund_type,
+                'fund_number': fund_number,
+                'fund_born_time': fund_born_time,
+                'fund_records_time': fund_records_time,
+                'fund_status': fund_status,
+                'fund_currency': fund_currency,
+                'invst_id': invst_id,
+                'refer': detail_url,
+                'dataId': dataId,
+                'invTime': int(time.time() * 1000)
+            }
+            yield data
+
 
     def data(self):
-        global headers
+        global headers, proxies
         col1 = self.db['page']
+        col1.update_one({'name': 'fund'}, {'$set': {'page': 1}})
         page = int(col1.find_one({'name': 'fund'})['page'])
-        for p in range(page, 2508):
+        for p in range(page, 25):
             print('当前页数为:{}'.format(str(p)))
             post_data = {
                 'page': p,
@@ -135,19 +216,43 @@ class Spider(object):
                 'per_page': 20,
                 'type': 3
             }
-            json_content = requests.post(self.start_url, data=post_data, headers=headers).json()
+            try:
+                json_content = requests.post(self.start_url, data=post_data, headers=headers,proxies=proxies,timeout=4).json()
+            except:
+                for x in range(10):
+                    try:
+                        proxies = random.choice(get_proxies())
+                        print(proxies)
+                        json_content = requests.post(self.start_url, data=post_data, headers=headers, proxies=proxies,
+                                                     timeout=4).json()
+                        break
+                    except:
+                        pass
 
             print('++++++++++  json_content  ++++++++++++')
             if json_content['status'] == '用户未登陆':
                 UpdateToken().get_token()
-               # time.sleep(5)
+                time.sleep(5)
                 with open(file_path, 'r') as f:
                     Authorization = f.read()
                 headers = {
                     "User-Agent": UserAgent,
                     "Authorization": Authorization,
                 }
-                json_content = requests.post(self.start_url, data=post_data, headers=headers).json()
+                try:
+                    json_content = requests.post(self.start_url, data=post_data, headers=headers, proxies=proxies,
+                                                 timeout=4).json()
+                except:
+                    for x in range(10):
+                        try:
+                            proxies = random.choice(get_proxies())
+                            print(proxies)
+                            json_content = requests.post(self.start_url, data=post_data, headers=headers,
+                                                         proxies=proxies,
+                                                         timeout=4).json()
+                            break
+                        except:
+                            pass
             try:
                 if json_content['message'] == 'Token过期' or '需要开通VIP':
                     UpdateToken().get_token()
@@ -158,57 +263,32 @@ class Spider(object):
                         "User-Agent": UserAgent,
                         "Authorization": Authorization,
                     }
-                    json_content = requests.post(self.start_url, data=post_data, headers=headers).json()
+                    try:
+                        json_content = requests.post(self.start_url, data=post_data, headers=headers, proxies=proxies,
+                                                     timeout=4).json()
+                    except:
+                        for x in range(10):
+                            try:
+                                proxies = random.choice(get_proxies())
+                                print(proxies)
+                                json_content = requests.post(self.start_url, data=post_data, headers=headers,
+                                                             proxies=proxies,
+                                                             timeout=4).json()
+                                break
+                            except:
+                                pass
             except Exception as e:
                 print(e)
+
+            print('****** json_content *******')
             print(json_content)
 
             detail_page = json_content['data']['list']
-           # time.sleep(5)
-            for d in detail_page:
-                if d is None:
-                    continue
-                id = d['fund_id']
-                detail_url = 'https://www.itjuzi.com/api/fund/' + str(id)
 
-                detail_json = requests.get(detail_url, headers=headers).json()
-                print(detail_json)
-
-                fund_name = detail_json['data']['fund_name']
-                fund_manage_name = detail_json['data']['fund_manage_name']
-                fund_type = detail_json['data']['fund_type']
-                fund_number = detail_json['data']['fund_number']
-                fund_born_time = detail_json['data']['fund_born_time']
-                fund_records_time = detail_json['data']['fund_records_time']
-                # 机构网址 (中国证券投资基金业协会中登记信息)
-                fund_status = detail_json['data']['fund_status']
-                fund_currency = detail_json['data']['fund_currency']
-                try:
-                    invst_id = detail_json['data']['invst_id']
-                except:
-                    invst_id = None
-                dataId = hashlib.sha256(detail_url.encode()).hexdigest()
-
-                data = {
-                    'category': '基金',
-                    'fund_id': id,
-                    'fund_name': fund_name,
-                    'fund_manage_name': fund_manage_name,
-                    'fund_type': fund_type,
-                    'fund_number': fund_number,
-                    'fund_born_time': fund_born_time,
-                    'fund_records_time': fund_records_time,
-                    'fund_status': fund_status,
-                    'fund_currency': fund_currency,
-                    'invst_id': invst_id,
-                    'refer': detail_url,
-                    'dataId': dataId,
-                    'invTime': int(time.time() * 1000)
-                }
-
+            for data in self.parse(detail_page):
+                print('****** data ******')
                 print(data)
                 self.save(data=data)
-                time.sleep(5)
 
             col1.update_one({'name': 'fund'}, {'$set': {'page': p + 1}})
 
@@ -216,3 +296,6 @@ class Spider(object):
 if __name__ == '__main__':
     spider = Spider()
     spider.data()
+    sched = BlockingScheduler()
+    sched.add_job(Spider().data, 'interval', hours=24)
+    sched.start()
